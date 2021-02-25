@@ -1881,9 +1881,13 @@ do_posix_spawn (const gchar * const *argv,
                 gint       *child_close_fds,
                 gint        stdin_fd,
                 gint        stdout_fd,
-                gint        stderr_fd)
+                gint        stderr_fd,
+                const gint *source_fds,
+                const gint *target_fds,
+                gint        n_fds)
 {
   pid_t pid;
+  gint *duped_source_fds = NULL;
   const gchar * const *argv_pass;
   posix_spawnattr_t attr;
   posix_spawn_file_actions_t file_actions;
@@ -2006,6 +2010,52 @@ do_posix_spawn (const gchar * const *argv,
         goto out_close_fds;
     }
 
+  /* If source_fds[i] != target_fds[i], we need to handle the case
+   * where the user has specified, e.g., 5 -> 4, 4 -> 6. We do this
+   * by duping the source fds temporarily in a first pass.
+   *
+   * If source_fds[i] == target_fds[i], then we just need to leak
+   * the fd into the child process, which we could do by temporarily
+   * unsetting CLOEXEC and then setting it again after we spawn if
+   * it was originally set. (POSIX requires that the addup2 action unset
+   * CLOEXEC if source and target are identical, so you'd think this
+   * wouldn't be needed, but unfortunately as of 2021 many libcs still
+   * don't do so, and we want this code to be safe for arbitrary libcs.)
+   * Anyway, unsetting CLOEXEC opens a small race window where the fd
+   * could be inherited into a child process if another thread spawns
+   * something at the same time. It is avoidable by using the same
+   * strategy that we already have to use anyway to handle source_fds[i]
+   * != target_fds[i], so we might as well always dupfd_cloexec here.
+   */
+  duped_source_fds = g_newa (gint, n_fds);
+  for (i = 0; i < n_fds; i++)
+    duped_source_fds[i] = dupfd_cloexec (source_fds[i]);
+
+  /* FIXME: this works in the naive case but not for a case like:
+   *
+   * Case: source_fd 5 -> target_fd 7, source_fd 4 -> target_fd 6
+   *
+   * dup(5) -> get unlucky, dup returns 6
+   * dup(4) -> dup returns 7
+   *
+   * This means we wind up with: 6 -> 7, 7 -> 6. That means that after
+   * we dup2(6, 7), we have clobbered fd 7 before we dup2(7, 6). End
+   * result is we have remapped 5 -> 7 as expected, but then remapped
+   * 5 -> 6 instead of 4 -> 6. So we will need a quadratic loop to check
+   * that each value in duped_source_fds is not present in target_fds,
+   * and repeatedly dup if it is.
+   *
+   * The existing fork/exec codepath has the exact same bug and must
+   * also be fixed.
+   */
+
+  for (i = 0; i < n_fds; i++)
+    {
+      r = posix_spawn_file_actions_adddup2 (&file_actions, duped_source_fds[i], target_fds[i]);
+      if (r != 0)
+        goto out_close_fds;
+    }
+
   /* Intentionally close the fds in the child as the last file action,
    * having been careful not to add the same fd to this list twice.
    *
@@ -2037,6 +2087,12 @@ do_posix_spawn (const gchar * const *argv,
 out_close_fds:
   for (i = 0; i < num_parent_close_fds; i++)
     close_and_invalidate (&parent_close_fds [i]);
+
+  if (duped_source_fds != NULL)
+    {
+      for (i = 0; i < n_fds; i++)
+        (void) close (duped_source_fds[i]);
+    }
 
   posix_spawn_file_actions_destroy (&file_actions);
 out_free_spawnattr:
@@ -2125,10 +2181,8 @@ fork_exec (gboolean              intermediate_child,
   child_close_fds[n_child_close_fds++] = -1;
 
 #ifdef POSIX_SPAWN_AVAILABLE
-  /* FIXME: Handle @source_fds and @target_fds in do_posix_spawn() using the
-   * file actions API. */
   if (!intermediate_child && working_directory == NULL && !close_descriptors &&
-      !search_path_from_envp && child_setup == NULL && n_fds == 0)
+      !search_path_from_envp && child_setup == NULL)
     {
       g_trace_mark (G_TRACE_CURRENT_TIME, 0,
                     "GLib", "posix_spawn",
@@ -2145,7 +2199,10 @@ fork_exec (gboolean              intermediate_child,
                                child_close_fds,
                                stdin_fd,
                                stdout_fd,
-                               stderr_fd);
+                               stderr_fd,
+                               source_fds,
+                               target_fds,
+                               n_fds);
       if (status == 0)
         goto success;
 
