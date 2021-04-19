@@ -64,6 +64,7 @@ gio_tests = {
   'g-icon' : {},
   'gdbus-addresses' : {},
   'gdbus-message' : {},
+  'gresolver' : {'dependencies' : [network_libs]},
   'inet-address' : {},
   'io-stream' : {},
   'memory-input-stream' : {},
