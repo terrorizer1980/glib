@@ -392,7 +392,11 @@ slice_config_init (SliceConfig *config)
       if (RUNNING_ON_VALGRIND)
         config->always_malloc = TRUE;
     }
+    config->always_malloc = TRUE;
 }
+
+G_LOCK_DEFINE_STATIC (metrics);
+static GMetricsTable *metrics_table;
 
 static void
 g_slice_init_nomessage (void)
@@ -452,6 +456,11 @@ g_slice_init_nomessage (void)
   allocator->max_slab_chunk_size_for_magazine_cache = MAX_SLAB_CHUNK_SIZE (allocator);
   if (allocator->config.always_malloc || allocator->config.bypass_magazines)
     allocator->max_slab_chunk_size_for_magazine_cache = 0;      /* non-optimized cases */
+
+  G_LOCK (metrics);
+  if (g_metrics_requested ("slice-memory-usage"))
+    metrics_table = g_metrics_table_new (sizeof (GSliceMetrics));
+  G_UNLOCK (metrics);
 }
 
 static inline guint
@@ -967,6 +976,8 @@ thread_memory_magazine2_free (ThreadMemory *tmem,
  *
  * Since: 2.10
  */
+#include <gatomic.h>
+static gsize g_slice_allocated_memory = 0;
 
 /**
  * g_slice_alloc:
@@ -989,6 +1000,17 @@ thread_memory_magazine2_free (ThreadMemory *tmem,
  */
 gpointer
 g_slice_alloc (gsize mem_size)
+{
+  char *name = g_strdup_printf ("%lu", mem_size);
+  gpointer mem = g_slice_alloc_with_name (mem_size, name);
+  g_free (name);
+
+  return mem;
+}
+
+gpointer
+g_slice_alloc_with_name (gsize mem_size,
+                         const char *name)
 {
   ThreadMemory *tmem;
   gsize chunk_size;
@@ -1029,6 +1051,26 @@ g_slice_alloc (gsize mem_size)
 
   TRACE (GLIB_SLICE_ALLOC((void*)mem, mem_size));
 
+  g_assert (((gssize) mem_size) == mem_size);
+
+  G_LOCK (metrics);
+  if (metrics_table != NULL && mem_size != 0)
+    {
+      GSliceMetrics *metrics = NULL;
+
+      g_slice_allocated_memory += mem_size;
+      metrics = g_metrics_table_get_record (metrics_table, name);
+      if (metrics == NULL)
+        {
+          GSliceMetrics empty_metrics = { 0 };
+          g_metrics_table_set_record (metrics_table, name, &empty_metrics);
+          metrics = g_metrics_table_get_record (metrics_table, name);
+        }
+      metrics->total_usage += mem_size;
+      metrics->number_of_allocations++;
+    }
+  G_UNLOCK (metrics);
+
   return mem;
 }
 
@@ -1055,6 +1097,16 @@ g_slice_alloc0 (gsize mem_size)
   return mem;
 }
 
+gpointer
+g_slice_alloc0_with_name (gsize mem_size,
+                          const char *name)
+{
+  gpointer mem = g_slice_alloc_with_name (mem_size, name);
+  if (mem)
+    memset (mem, 0, mem_size);
+  return mem;
+}
+
 /**
  * g_slice_copy:
  * @block_size: the number of bytes to allocate
@@ -1074,7 +1126,20 @@ gpointer
 g_slice_copy (gsize         mem_size,
               gconstpointer mem_block)
 {
-  gpointer mem = g_slice_alloc (mem_size);
+  gpointer mem;
+  char *name = g_strdup_printf ("%lu", mem_size);
+  mem = g_slice_copy_with_name (mem_size, mem_block, name);
+  g_free (name);
+
+  return mem;
+}
+
+gpointer
+g_slice_copy_with_name (gsize         mem_size,
+		        gconstpointer mem_block,
+                        const char    *name)
+{
+  gpointer mem = g_slice_alloc_with_name (mem_size, name);
   if (mem)
     memcpy (mem, mem_block, mem_size);
   return mem;
@@ -1101,8 +1166,19 @@ void
 g_slice_free1 (gsize    mem_size,
                gpointer mem_block)
 {
+  char *name = g_strdup_printf ("%lu", mem_size);
+  g_slice_free1_with_name (mem_size, mem_block, name);
+  g_free (name);
+}
+
+void
+g_slice_free1_with_name (gsize    mem_size,
+                         gpointer mem_block,
+                         const char *name)
+{
   gsize chunk_size = P2ALIGN (mem_size);
   guint acat = allocator_categorize (chunk_size);
+
   if (G_UNLIKELY (!mem_block))
     return;
   if (G_UNLIKELY (allocator->config.debug_blocks) &&
@@ -1137,6 +1213,44 @@ g_slice_free1 (gsize    mem_size,
       g_free (mem_block);
     }
   TRACE (GLIB_SLICE_FREE((void*)mem_block, mem_size));
+
+  g_assert (((gssize) mem_size) == mem_size);
+  G_LOCK (metrics);
+  g_slice_allocated_memory -= mem_size;
+  if (metrics_table != NULL)
+    {
+      GSliceMetrics *metrics = NULL;
+
+      metrics = g_metrics_table_get_record (metrics_table, name);
+      if (metrics != NULL)
+        {
+          metrics->total_usage -= mem_size;
+          metrics->number_of_allocations--;
+
+          if (metrics->total_usage <= 0)
+            g_metrics_table_remove_record (metrics_table, name);
+        }
+    }
+  G_UNLOCK (metrics);
+}
+
+gsize
+g_slice_get_total_allocated_memory (void)
+{
+  return g_slice_allocated_memory;
+}
+
+GMetricsTable *
+g_slice_lock_metrics_table (void)
+{
+  G_LOCK (metrics);
+  return metrics_table;
+}
+
+void
+g_slice_unlock_metrics_table (void)
+{
+  G_UNLOCK (metrics);
 }
 
 /**
@@ -1164,6 +1278,18 @@ g_slice_free_chain_with_offset (gsize    mem_size,
                                 gpointer mem_chain,
                                 gsize    next_offset)
 {
+  char *name = g_strdup_printf ("%lu", mem_size);
+  g_slice_free_chain_with_offset_and_name (mem_size, mem_chain, next_offset, name);
+  g_free (name);
+}
+
+void
+g_slice_free_chain_with_offset_and_name (gsize    mem_size,
+                                         gpointer mem_chain,
+                                         gsize    next_offset,
+                                         const char *name)
+{
+  gssize chain_total = 0, chain_length = 0;
   gpointer slice = mem_chain;
   /* while the thread magazines and the magazine cache are implemented so that
    * they can easily be extended to allow for free lists containing more free
@@ -1173,7 +1299,7 @@ g_slice_free_chain_with_offset (gsize    mem_size,
    *   the code adapting to lock contention;
    * - freeing a single node to the thread magazines is very fast, so this
    *   O(list_length) operation is multiplied by a fairly small factor;
-   * - memory usage histograms on larger applications seem to indicate that
+   * - memory usage metricss on larger applications seem to indicate that
    *   the amount of released multi node lists is negligible in comparison
    *   to single node releases.
    * - the major performance bottle neck, namely g_private_get() or
@@ -1230,8 +1356,28 @@ g_slice_free_chain_with_offset (gsize    mem_size,
           abort();
         if (G_UNLIKELY (g_mem_gc_friendly))
           memset (current, 0, mem_size);
+        chain_total += mem_size;
+        chain_length++;
         g_free (current);
       }
+
+      G_LOCK (metrics);
+      g_slice_allocated_memory -= chain_total;
+      if (metrics_table != NULL)
+        {
+          GSliceMetrics *metrics = NULL;
+
+          metrics = g_metrics_table_get_record (metrics_table, name);
+          if (metrics != NULL)
+            {
+              metrics->total_usage -= chain_total;
+              metrics->number_of_allocations -= chain_length;
+
+              if (metrics->total_usage <= 0)
+                g_metrics_table_remove_record (metrics_table, name);
+            }
+        }
+      G_UNLOCK (metrics);
 }
 
 /* --- single page allocator --- */

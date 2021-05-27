@@ -268,7 +268,7 @@ g_hook_alloc (GHookList *hook_list)
   g_return_val_if_fail (hook_list != NULL, NULL);
   g_return_val_if_fail (hook_list->is_setup, NULL);
   
-  hook = g_slice_alloc0 (hook_list->hook_size);
+  hook = g_slice_alloc0_with_name (hook_list->hook_size, "GHook");
   hook->data = NULL;
   hook->next = NULL;
   hook->prev = NULL;
