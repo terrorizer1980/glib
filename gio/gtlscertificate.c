@@ -947,8 +947,13 @@ g_tls_certificate_get_issuer (GTlsCertificate  *cert)
  * @trusted_ca is %NULL, that bit will never be set in the return
  * value.
  *
- * (All other #GTlsCertificateFlags values will always be set or unset
- * as appropriate.)
+ * GLib guarantees that if certificate verification fails, at least one
+ * one error will be set in the return value, but it does not guarantee
+ * that all possible errors will be set. Accordingly, you may not safely
+ * decide to ignore any particular type of error. For example, it would
+ * beincorrect to mask %G_TLS_CERTIFICATE_EXPIRED if you want to allow
+ * expired certificates, because this could potentially be the only
+ * error flag set even if other problems exist with the certificate.
  *
  * Returns: the appropriate #GTlsCertificateFlags
  *
