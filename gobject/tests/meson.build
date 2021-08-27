@@ -51,6 +51,7 @@ gobject_tests = {
   'signals' : {
     'source' : ['signals.c', marshalers_h, marshalers_c],
   },
+  'signalgroup' : {},
   'testing' : {},
   'type-flags' : {},
 }
