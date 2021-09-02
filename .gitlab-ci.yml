@@ -412,6 +412,36 @@ freebsd-12-x86_64:
       - "_build/meson-logs"
       - "_build/${CI_JOB_NAME}-report.xml"
 
+freebsd-13-x86_64:
+  stage: build
+# only:
+#   - branches@GNOME/glib
+  tags:
+    - freebsd-13
+  needs: []
+  variables:
+    CPPFLAGS: -I/usr/local/include
+    LDFLAGS: -L/usr/local/lib -Wl,--disable-new-dtags
+    LANG: C.UTF-8
+  before_script:
+    - bash .gitlab-ci/show-execution-environment.sh
+  script:
+    - meson ${MESON_COMMON_OPTIONS} --localstatedir=/var -Db_lundef=false -Diconv=external -Dxattr=false _build
+    - ninja -C _build
+    - bash -x ./.gitlab-ci/run-tests.sh
+  except:
+    - tags
+  artifacts:
+    reports:
+      junit: "_build/${CI_JOB_NAME}-report.xml"
+    name: "glib-${CI_JOB_NAME}-${CI_COMMIT_REF_NAME}"
+    when: always
+    paths:
+      - "_build/config.h"
+      - "_build/glib/glibconfig.h"
+      - "_build/meson-logs"
+      - "_build/${CI_JOB_NAME}-report.xml"
+
 macos:
   extends: .only-default
   stage: build
