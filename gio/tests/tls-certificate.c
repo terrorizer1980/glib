@@ -586,6 +586,21 @@ ip_addresses (void)
   g_object_unref (cert);
 }
 
+static void
+from_pkcs12 (void)
+{
+  GTlsCertificate *cert;
+  GError *error = NULL;
+  const guchar data[1] = { 0 };
+
+  /* This simply fails because our test backend doesn't support this
+   * property. This reflects using a backend that doesn't support it. */
+  cert = g_tls_certificate_new_from_pkcs12 (data, 1, NULL, &error);
+
+  g_assert_null (cert);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -656,6 +671,8 @@ main (int   argc,
                    from_pkcs11_uri);
   g_test_add_func ("/tls-certificate/pkcs11-uri-unsupported",
                    from_unsupported_pkcs11_uri);
+  g_test_add_func ("/tls-certificate/from_pkcs12",
+                   from_pkcs12);
   g_test_add_func ("/tls-certificate/not-valid-before",
                    not_valid_before);
   g_test_add_func ("/tls-certificate/not-valid-after",
